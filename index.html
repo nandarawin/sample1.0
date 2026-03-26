@@ -7,6 +7,7 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.19.1/umd/index.min.js"></script>
   <style>
     html, body, #root { margin: 0; padding: 0; min-height: 100vh; }
   </style>
@@ -68,12 +69,8 @@ function BarcodeScanner({ onDetected, onClose }) {
   const [ready, setReady]       = useState(!!window.ZXing);
 
   useEffect(() => {
-    if (window.ZXing) { setReady(true); return; }
-    const s = document.createElement("script");
-    s.src = "https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.19.1/umd/index.min.js";
-    s.onload  = () => setReady(true);
-    s.onerror = () => { setStatus("error"); setErrMsg("Could not load scanner library."); };
-    document.head.appendChild(s);
+    // ZXing is preloaded in <head>
+    setReady(true);
   }, []);
 
   useEffect(() => {
@@ -259,13 +256,7 @@ function NexStoreIMS() {
     r.readAsDataURL(file);
     setImgDecoding(true);
     // Load ZXing if needed
-    if (!window.ZXing) {
-      await new Promise(res => {
-        const s = document.createElement("script");
-        s.src = "https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.19.1/umd/index.min.js";
-        s.onload = res; s.onerror = res; document.head.appendChild(s);
-      });
-    }
+    // ZXing preloaded in <head>
     // Try decode
     try {
       const img = new Image();
@@ -578,13 +569,7 @@ function NexStoreIMS() {
                 {/* Two scan modes */}
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:20}}>
                   <button className="scan-method" style={{background:"#1C3F6E",color:"#fff",border:"2px solid #1C3F6E"}}
-                    onClick={()=>{
-                      if (!window.ZXing) {
-                        const s=document.createElement("script");
-                        s.src="https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.19.1/umd/index.min.js";
-                        s.onload=()=>setShowCamera(true); document.head.appendChild(s);
-                      } else setShowCamera(true);
-                    }}>
+                    onClick={()=>setShowCamera(true)}>
                     <span style={{fontSize:32}}>📷</span>
                     <span>Live Camera</span>
                     <span style={{fontSize:10.5,opacity:.75,fontWeight:400}}>Barcode / QR scan</span>
