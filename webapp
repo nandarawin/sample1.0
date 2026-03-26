@@ -1,4 +1,45 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NexStore IMS — Nexwah Technology</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    html, body, #root { margin: 0; padding: 0; min-height: 100vh; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    /* ── localStorage-based storage (replaces window.storage for GitHub Pages) ── */
+    window.storage = {
+      get: async (key) => {
+        try {
+          const val = localStorage.getItem(key);
+          if (val === null) throw new Error('not found');
+          return { key, value: val };
+        } catch(e) { throw e; }
+      },
+      set: async (key, value) => {
+        localStorage.setItem(key, value);
+        return { key, value };
+      },
+      delete: async (key) => {
+        localStorage.removeItem(key);
+        return { key, deleted: true };
+      },
+      list: async (prefix) => {
+        const keys = Object.keys(localStorage).filter(k => !prefix || k.startsWith(prefix));
+        return { keys };
+      }
+    };
+
 
 const SK_INVENTORY = "nexstore-inventory-v1";
 const SK_TRANSACTIONS = "nexstore-transactions-v1";
@@ -133,7 +174,7 @@ function BarcodeScanner({ onDetected, onClose }) {
 }
 
 /* ── MAIN APP ── */
-export default function NexStoreIMS() {
+function NexStoreIMS() {
   const [inventory, setInventory]       = useState([]);
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading]           = useState(true);
@@ -1000,3 +1041,10 @@ export default function NexStoreIMS() {
     </div>
   );
 }
+
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(NexStoreIMS));
+  </script>
+</body>
+</html>
