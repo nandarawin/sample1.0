@@ -1,0 +1,1050 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NexStore IMS — Nexwah Technology</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    html, body, #root { margin: 0; padding: 0; min-height: 100vh; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    /* ── localStorage-based storage (replaces window.storage for GitHub Pages) ── */
+    window.storage = {
+      get: async (key) => {
+        try {
+          const val = localStorage.getItem(key);
+          if (val === null) throw new Error('not found');
+          return { key, value: val };
+        } catch(e) { throw e; }
+      },
+      set: async (key, value) => {
+        localStorage.setItem(key, value);
+        return { key, value };
+      },
+      delete: async (key) => {
+        localStorage.removeItem(key);
+        return { key, deleted: true };
+      },
+      list: async (prefix) => {
+        const keys = Object.keys(localStorage).filter(k => !prefix || k.startsWith(prefix));
+        return { keys };
+      }
+    };
+
+
+const SK_INVENTORY = "nexstore-inventory-v1";
+const SK_TRANSACTIONS = "nexstore-transactions-v1";
+
+const SEED = [
+  { id:"s1", partNumber:"NWCB-0004-001", nexwahPN:"NW-P-0004", description:"Power Cable 6way 40cm Length x1", quantity:36, stockLevel:30, location:"BX09", row:"A1", order:40, imageUrl:"" },
+  { id:"s2", partNumber:"NWCB-0005-001", nexwahPN:"NW-P-0005", description:"Display Ribbon Cable 4way 1.27mm pitch 100cm", quantity:12, stockLevel:10, location:"BX09", row:"A2", order:20, imageUrl:"" },
+  { id:"s3", partNumber:"NWCB-DC5.5X2.1-MINIUSB-3M", nexwahPN:"NW-DC-001", description:"DC Power Cable DC5.5x2.1 to MiniUSB 3M", quantity:8, stockLevel:15, location:"SF02", row:"B1", order:20, imageUrl:"" },
+  { id:"s4", partNumber:"NWCB-DB15M-DB9F-3M-001", nexwahPN:"NW-DB-001", description:"DB15 Male to DB9 Female 3M Cable Assembly", quantity:25, stockLevel:10, location:"SF02", row:"B2", order:30, imageUrl:"" },
+  { id:"s5", partNumber:"NWCB-LIDC500MM2X4", nexwahPN:"NW-LI-001", description:"IDC 2x4pins 50cm Grey Ribbon Cable awm 2651", quantity:4, stockLevel:10, location:"SD08", row:"C1", order:15, imageUrl:"" },
+  { id:"s6", partNumber:"NWCB-LIDC1000MM2X4", nexwahPN:"NW-LI-002", description:"IDC 2x4pins 100cm Grey Ribbon Cable awm 2651", quantity:18, stockLevel:15, location:"SD08", row:"C2", order:19, imageUrl:"" },
+];
+
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
+function now() { return new Date().toISOString(); }
+function fmt(iso) { return new Date(iso).toLocaleString("en-SG",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}); }
+
+/* ── BARCODE SCANNER COMPONENT ── */
+function BarcodeScanner({ onDetected, onClose }) {
+  const videoRef   = useRef(null);
+  const readerRef  = useRef(null);
+  const streamRef  = useRef(null);
+  const [status, setStatus]     = useState("loading");
+  const [errMsg, setErrMsg]     = useState("");
+  const [manual, setManual]     = useState("");
+  const [ready, setReady]       = useState(!!window.ZXing);
+
+  useEffect(() => {
+    if (window.ZXing) { setReady(true); return; }
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.19.1/umd/index.min.js";
+    s.onload  = () => setReady(true);
+    s.onerror = () => { setStatus("error"); setErrMsg("Could not load scanner library."); };
+    document.head.appendChild(s);
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    let dead = false;
+    (async () => {
+      try {
+        const Z = window.ZXing;
+        const hints = new Map();
+        hints.set(Z.DecodeHintType.POSSIBLE_FORMATS, [
+          Z.BarcodeFormat.CODE_128, Z.BarcodeFormat.CODE_39,
+          Z.BarcodeFormat.EAN_13,  Z.BarcodeFormat.EAN_8,
+          Z.BarcodeFormat.QR_CODE, Z.BarcodeFormat.DATA_MATRIX,
+        ]);
+        const reader = new Z.BrowserMultiFormatReader(hints);
+        readerRef.current = reader;
+        const devices = await Z.BrowserMultiFormatReader.listVideoInputDevices();
+        if (dead) return;
+        if (!devices?.length) { setStatus("error"); setErrMsg("No camera detected."); return; }
+        const cam = devices.find(d => /back|rear|env/i.test(d.label)) || devices[0];
+        setStatus("scanning");
+        await reader.decodeFromVideoDevice(cam.deviceId, videoRef.current, (res) => {
+          if (dead || !res) return;
+          dead = true;
+          if (streamRef.current) streamRef.current.getTracks().forEach(t=>t.stop());
+          reader.reset();
+          onDetected(res.getText());
+        });
+        if (videoRef.current?.srcObject) streamRef.current = videoRef.current.srcObject;
+      } catch(e) {
+        if (!dead) { setStatus("error"); setErrMsg("Camera access denied. Use manual entry below."); }
+      }
+    })();
+    return () => {
+      dead = true;
+      try { readerRef.current?.reset(); } catch(_) {}
+      streamRef.current?.getTracks().forEach(t=>t.stop());
+    };
+  }, [ready, onDetected]);
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.88)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{background:"#111d2e",border:"1px solid #2a3a50",borderRadius:16,padding:24,width:"100%",maxWidth:460,boxShadow:"0 24px 64px rgba(0,0,0,.6)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+          <div style={{color:"#fff",fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:16}}>📷 Scan Barcode / QR</div>
+          <button onClick={onClose} style={{background:"transparent",border:"none",color:"#667",fontSize:22,cursor:"pointer"}}>✕</button>
+        </div>
+
+        {/* Video */}
+        <div style={{position:"relative",background:"#000",borderRadius:10,overflow:"hidden",aspectRatio:"4/3",marginBottom:14}}>
+          <video ref={videoRef} style={{width:"100%",height:"100%",objectFit:"cover",display:status==="scanning"?"block":"none"}} playsInline muted autoPlay/>
+          {status==="scanning"&&(
+            <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
+              <div style={{position:"relative",width:210,height:140}}>
+                <div style={{position:"absolute",inset:0,border:"2px solid rgba(232,160,32,.3)",borderRadius:10}}/>
+                {[{t:0,l:0,bt:"4px solid #E8A020",bl:"4px solid #E8A020",br:"none",bb:"none",rad:"8px 0 0 0"},
+                  {t:0,r:0,bt:"4px solid #E8A020",br:"4px solid #E8A020",bl:"none",bb:"none",rad:"0 8px 0 0"},
+                  {b:0,l:0,bb:"4px solid #E8A020",bl:"4px solid #E8A020",br:"none",bt:"none",rad:"0 0 0 8px"},
+                  {b:0,r:0,bb:"4px solid #E8A020",br:"4px solid #E8A020",bl:"none",bt:"none",rad:"0 0 8px 0"},
+                ].map((c,i)=>(
+                  <div key={i} style={{position:"absolute",width:22,height:22,top:c.t,left:c.l,bottom:c.b,right:c.r,
+                    borderTop:c.bt||"none",borderLeft:c.bl||"none",borderRight:c.br||"none",borderBottom:c.bb||"none",borderRadius:c.rad}}/>
+                ))}
+                <div style={{position:"absolute",left:4,right:4,height:2,background:"rgba(232,160,32,.8)",animation:"scanLine 2s linear infinite"}}/>
+              </div>
+            </div>
+          )}
+          {status==="loading"&&(
+            <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",color:"#667",fontSize:13}}>
+              <div style={{fontSize:28,marginBottom:8}}>⏳</div>Starting camera…
+            </div>
+          )}
+          {status==="error"&&(
+            <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",color:"#f87171",fontSize:13,padding:20,textAlign:"center"}}>
+              <div style={{fontSize:28,marginBottom:8}}>📵</div>{errMsg}
+            </div>
+          )}
+        </div>
+
+        {status==="scanning"&&<div style={{color:"#8aacd4",fontSize:11.5,textAlign:"center",marginBottom:14}}>Point camera at barcode or QR on component packaging</div>}
+
+        <div style={{borderTop:"1px solid #1e2d40",paddingTop:14}}>
+          <div style={{fontSize:11,color:"#667",fontWeight:700,letterSpacing:".07em",marginBottom:8}}>OR ENTER MANUALLY</div>
+          <div style={{display:"flex",gap:8}}>
+            <input style={{flex:1,background:"#0d1929",border:"1.5px solid #1e2d40",borderRadius:7,color:"#e2e8f0",padding:"9px 12px",fontSize:13,fontFamily:"'IBM Plex Mono',monospace",outline:"none"}}
+              placeholder="Part number / serial…" value={manual} onChange={e=>setManual(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&manual.trim()&&onDetected(manual.trim())}/>
+            <button onClick={()=>manual.trim()&&onDetected(manual.trim())}
+              style={{background:"#E8A020",border:"none",borderRadius:7,color:"#fff",padding:"9px 16px",fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>
+              Go →
+            </button>
+          </div>
+        </div>
+      </div>
+      <style>{`@keyframes scanLine{0%{top:8%}50%{top:80%}100%{top:8%}}`}</style>
+    </div>
+  );
+}
+
+/* ── MAIN APP ── */
+function NexStoreIMS() {
+  const [inventory, setInventory]       = useState([]);
+  const [transactions, setTransactions] = useState([]);
+  const [loading, setLoading]           = useState(true);
+  const [tab, setTab]                   = useState("dashboard");
+  const [search, setSearch]             = useState("");
+  const [toast, setToast]               = useState(null);
+  const [modal, setModal]               = useState(null);
+  const [selected, setSelected]         = useState(null);
+  const [form, setForm]                 = useState({});
+  const [formErr, setFormErr]           = useState({});
+
+  // Scan tab state
+  const [showCamera, setShowCamera]   = useState(false);
+  const [scanRaw, setScanRaw]         = useState("");
+  const [scanMatch, setScanMatch]     = useState(null);
+  const [scanAction, setScanAction]   = useState("IN");
+  const [scanQty, setScanQty]         = useState("1");
+  const [scanNotes, setScanNotes]     = useState("");
+  const [scanImg, setScanImg]         = useState("");
+  const [scanHistory, setScanHistory] = useState([]);
+  const [imgDecoding, setImgDecoding] = useState(false);
+
+  // Log IN/OUT tab
+  const [txForm, setTxForm]         = useState({ partNumber:"", qty:"1", notes:"", type:"IN", imageDataUrl:"" });
+  const [txMatches, setTxMatches]   = useState([]);
+  const [txStep, setTxStep]         = useState(1);
+  const [txSelected, setTxSelected] = useState(null);
+
+  // BOM
+  const [bomRows, setBomRows] = useState([]);
+  const [bomStep, setBomStep] = useState(1);
+  const [bomType, setBomType] = useState("IN");
+
+  const imgRef     = useRef();
+  const scanImgRef = useRef();
+
+  const persist = useCallback(async (inv, txs) => {
+    try {
+      if (inv !== undefined) await window.storage.set(SK_INVENTORY, JSON.stringify(inv));
+      if (txs !== undefined) await window.storage.set(SK_TRANSACTIONS, JSON.stringify(txs));
+    } catch(e) { showToast("Storage error","error"); }
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const ri = await window.storage.get(SK_INVENTORY);
+        const rt = await window.storage.get(SK_TRANSACTIONS);
+        setInventory(ri ? JSON.parse(ri.value) : SEED);
+        setTransactions(rt ? JSON.parse(rt.value) : []);
+        if (!ri) await window.storage.set(SK_INVENTORY, JSON.stringify(SEED));
+      } catch { setInventory(SEED); setTransactions([]); }
+      setLoading(false);
+    })();
+  }, []);
+
+  const showToast = (msg, type="ok") => { setToast({msg,type}); setTimeout(()=>setToast(null),3200); };
+
+  /* ── SCAN LOGIC ── */
+  const resolveMatch = useCallback((raw, inv) => {
+    const q = raw.toLowerCase().trim();
+    return inv.find(i =>
+      i.partNumber.toLowerCase() === q ||
+      i.nexwahPN?.toLowerCase() === q ||
+      i.partNumber.toLowerCase().includes(q) ||
+      q.includes(i.partNumber.toLowerCase())
+    ) || null;
+  }, []);
+
+  const handleScanDetected = useCallback((raw) => {
+    setShowCamera(false);
+    setScanRaw(raw);
+    setScanMatch(resolveMatch(raw, inventory));
+    setScanQty("1"); setScanNotes(""); setScanImg("");
+  }, [inventory, resolveMatch]);
+
+  const handleScanImgUpload = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    // Store preview
+    const r = new FileReader();
+    r.onload = ev => setScanImg(ev.target.result);
+    r.readAsDataURL(file);
+    setImgDecoding(true);
+    // Load ZXing if needed
+    if (!window.ZXing) {
+      await new Promise(res => {
+        const s = document.createElement("script");
+        s.src = "https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.19.1/umd/index.min.js";
+        s.onload = res; s.onerror = res; document.head.appendChild(s);
+      });
+    }
+    // Try decode
+    try {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      await new Promise((res, rej) => { img.onload=res; img.onerror=rej; img.src=url; });
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width; canvas.height = img.height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const imageData = ctx.getImageData(0,0,canvas.width,canvas.height);
+      const Z = window.ZXing;
+      const hints = new Map(); hints.set(Z.DecodeHintType.TRY_HARDER, true);
+      const reader = new Z.MultiFormatReader(); reader.setHints(hints);
+      const lum = new Z.RGBLuminanceSource(imageData.data, canvas.width, canvas.height);
+      const bmp = new Z.BinaryBitmap(new Z.HybridBinarizer(lum));
+      const result = reader.decode(bmp);
+      URL.revokeObjectURL(url);
+      setImgDecoding(false);
+      showToast("Barcode decoded: " + result.getText());
+      handleScanDetected(result.getText());
+    } catch {
+      setImgDecoding(false);
+      showToast("No barcode found in image — enter part number manually","warn");
+    }
+    e.target.value = "";
+  };
+
+  const commitScan = async () => {
+    if (!scanMatch) { showToast("No matching part — add it first","error"); return; }
+    const qty = +scanQty;
+    if (!qty || qty <= 0) { showToast("Enter valid quantity","error"); return; }
+    const before = scanMatch.quantity;
+    const after  = scanAction==="IN" ? before+qty : Math.max(0, before-qty);
+    const inv = inventory.map(i => i.id===scanMatch.id ? {...i, quantity:after, imageUrl:scanImg||i.imageUrl} : i);
+    setInventory(inv); await persist(inv);
+    const tx = { id:uid(), type:scanAction, partNumber:scanMatch.partNumber, description:scanMatch.description,
+      qty: scanAction==="IN" ? qty : -(before-after), before, after, ts:now(),
+      notes: scanNotes||"Via scan", imageDataUrl:scanImg||"" };
+    const txs = [tx, ...transactions]; setTransactions(txs); await persist(undefined, txs);
+    setScanHistory(h => [tx, ...h.slice(0,19)]);
+    showToast(`${scanAction==="IN"?"IN":"OUT"}: ${scanMatch.partNumber} ×${qty}`);
+    setScanRaw(""); setScanMatch(null); setScanQty("1"); setScanNotes(""); setScanImg("");
+  };
+
+  /* ── INVENTORY CRUD ── */
+  const openAdd    = () => { setForm({partNumber:"",nexwahPN:"",description:"",quantity:"0",stockLevel:"10",location:"",row:"",order:"0",imageUrl:""}); setFormErr({}); setModal("add"); };
+  const openEdit   = (i) => { setSelected(i); setForm({...i}); setFormErr({}); setModal("edit"); };
+  const openView   = (i) => { setSelected(i); setModal("view"); };
+  const openDelete = (i) => { setSelected(i); setModal("delete"); };
+
+  const validate = () => {
+    const e={};
+    if (!form.partNumber?.trim()) e.partNumber="Required";
+    if (!form.description?.trim()) e.description="Required";
+    if (isNaN(+form.quantity)||+form.quantity<0) e.quantity="Invalid";
+    setFormErr(e); return !Object.keys(e).length;
+  };
+
+  const saveAdd = async () => {
+    if (!validate()) return;
+    const item = {...form, id:uid(), quantity:+form.quantity, stockLevel:+form.stockLevel||0, order:+form.order||0, imageUrl:form.imageUrl||""};
+    const inv = [...inventory, item]; setInventory(inv); await persist(inv);
+    const tx = {id:uid(),type:"ADD",partNumber:item.partNumber,description:item.description,qty:item.quantity,before:0,after:item.quantity,ts:now(),notes:"New item"};
+    const txs=[tx,...transactions]; setTransactions(txs); await persist(undefined,txs);
+    setModal(null); showToast(`${item.partNumber} added`);
+  };
+
+  const saveEdit = async () => {
+    if (!validate()) return;
+    const prev = inventory.find(i=>i.id===selected.id);
+    const item = {...form, id:selected.id, quantity:+form.quantity, stockLevel:+form.stockLevel||0, order:+form.order||0};
+    const inv = inventory.map(i=>i.id===selected.id?item:i); setInventory(inv); await persist(inv);
+    if (+form.quantity !== prev.quantity) {
+      const tx={id:uid(),type:"EDIT",partNumber:item.partNumber,description:item.description,qty:+form.quantity-prev.quantity,before:prev.quantity,after:+form.quantity,ts:now(),notes:"Manual edit"};
+      const txs=[tx,...transactions]; setTransactions(txs); await persist(undefined,txs);
+    }
+    setModal(null); showToast(`${item.partNumber} updated`);
+  };
+
+  const doDelete = async () => {
+    const inv = inventory.filter(i=>i.id!==selected.id); setInventory(inv); await persist(inv);
+    const tx={id:uid(),type:"DELETE",partNumber:selected.partNumber,description:selected.description,qty:0,before:selected.quantity,after:0,ts:now(),notes:"Deleted"};
+    const txs=[tx,...transactions]; setTransactions(txs); await persist(undefined,txs);
+    setModal(null); showToast(`${selected.partNumber} removed`,"error");
+  };
+
+  const onImgChange = (e) => {
+    const file=e.target.files[0]; if(!file) return;
+    const r=new FileReader(); r.onload=ev=>setForm(p=>({...p,imageUrl:ev.target.result})); r.readAsDataURL(file); e.target.value="";
+  };
+
+  /* ── LOG IN/OUT ── */
+  const searchParts = (val) => {
+    setTxForm(p=>({...p,partNumber:val}));
+    if (val.length<2) { setTxMatches([]); return; }
+    const q=val.toLowerCase();
+    setTxMatches(inventory.filter(i=>i.partNumber.toLowerCase().includes(q)||i.description.toLowerCase().includes(q)||i.nexwahPN?.toLowerCase().includes(q)).slice(0,6));
+  };
+  const selectTxPart = (item) => { setTxSelected(item); setTxForm(p=>({...p,partNumber:item.partNumber})); setTxMatches([]); setTxStep(2); };
+  const submitTx = async () => {
+    const qty=+txForm.qty;
+    if (!txSelected||isNaN(qty)||qty<=0) { showToast("Enter valid qty","error"); return; }
+    const type=txForm.type, before=txSelected.quantity;
+    const after=type==="IN"?before+qty:Math.max(0,before-qty);
+    const inv=inventory.map(i=>i.id===txSelected.id?{...i,quantity:after,imageUrl:txForm.imageDataUrl||i.imageUrl}:i);
+    setInventory(inv); await persist(inv);
+    const tx={id:uid(),type,partNumber:txSelected.partNumber,description:txSelected.description,qty:type==="IN"?qty:-(before-after),before,after,ts:now(),notes:txForm.notes,imageDataUrl:txForm.imageDataUrl||""};
+    const txs=[tx,...transactions]; setTransactions(txs); await persist(undefined,txs);
+    showToast(`${type==="IN"?"IN":"OUT"}: ${txSelected.partNumber} ×${Math.abs(tx.qty)}`);
+    setTxForm({partNumber:"",qty:"1",notes:"",type:txForm.type,imageDataUrl:""}); setTxSelected(null); setTxStep(1);
+  };
+
+  /* ── BOM ── */
+  const parseBOM = (e) => {
+    const file=e.target.files[0]; if(!file) return;
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      const lines=ev.target.result.trim().split("\n");
+      const rows=lines.slice(1).map(l=>{
+        const c=l.split(",").map(x=>x.replace(/"/g,"").trim());
+        return {partNumber:c[0]||"",description:c[1]||"",qty:+c[2]||0,location:c[3]||"",skip:false};
+      }).filter(r=>r.partNumber);
+      setBomRows(rows.map(r=>({...r,found:inventory.find(i=>i.partNumber.toLowerCase()===r.partNumber.toLowerCase()||i.nexwahPN?.toLowerCase()===r.partNumber.toLowerCase())||null,status:inventory.some(i=>i.partNumber.toLowerCase()===r.partNumber.toLowerCase())?"matched":"new"})));
+      setBomStep(2);
+    };
+    reader.readAsText(file); e.target.value="";
+  };
+  const applyBOM = async () => {
+    let inv=[...inventory]; const newTxs=[];
+    for (const row of bomRows) {
+      if (row.skip||!+row.qty) continue;
+      const qty=+row.qty;
+      if (row.found) {
+        const before=row.found.quantity, after=bomType==="IN"?before+qty:Math.max(0,before-qty);
+        inv=inv.map(i=>i.id===row.found.id?{...i,quantity:after}:i);
+        newTxs.push({id:uid(),type:bomType,partNumber:row.found.partNumber,description:row.found.description,qty:bomType==="IN"?qty:-(before-after),before,after,ts:now(),notes:"BOM import"});
+      } else if (bomType==="IN") {
+        const item={id:uid(),partNumber:row.partNumber,nexwahPN:"",description:row.description,quantity:qty,stockLevel:0,location:row.location||"",row:"",order:0,imageUrl:""};
+        inv=[...inv,item]; newTxs.push({id:uid(),type:"ADD",partNumber:item.partNumber,description:item.description,qty,before:0,after:qty,ts:now(),notes:"BOM import – new"});
+      }
+    }
+    setInventory(inv); await persist(inv);
+    const txs=[...newTxs,...transactions]; setTransactions(txs); await persist(undefined,txs);
+    setBomStep(3); showToast(`BOM: ${newTxs.length} transactions applied`);
+  };
+
+  /* ── DERIVED ── */
+  const filtered  = inventory.filter(i=>{ const q=search.toLowerCase(); return !q||i.partNumber.toLowerCase().includes(q)||i.description.toLowerCase().includes(q)||i.location?.toLowerCase().includes(q)||i.nexwahPN?.toLowerCase().includes(q); });
+  const lowStock  = inventory.filter(i=>i.quantity<=i.stockLevel);
+  const totalQty  = inventory.reduce((s,i)=>s+i.quantity,0);
+
+  const exportCSV = () => {
+    const hdr=["PartNumber","NexwahPN","Description","Quantity","StockLevel","Location","Row","Order"];
+    const rows=inventory.map(i=>[i.partNumber,i.nexwahPN,i.description,i.quantity,i.stockLevel,i.location,i.row,i.order]);
+    const csv=[hdr,...rows].map(r=>r.map(c=>`"${c??''}"`).join(",")).join("\n");
+    const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"})); a.download="nexstore_inventory.csv"; a.click();
+  };
+  const exportTxCSV = () => {
+    const hdr=["Timestamp","Type","PartNumber","Description","Qty","Before","After","Notes"];
+    const rows=transactions.map(t=>[fmt(t.ts),t.type,t.partNumber,t.description,t.qty,t.before,t.after,t.notes]);
+    const csv=[hdr,...rows].map(r=>r.map(c=>`"${c??''}"`).join(",")).join("\n");
+    const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"})); a.download="nexstore_transactions.csv"; a.click();
+  };
+
+  if (loading) return <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#F5F3EE",fontFamily:"'IBM Plex Mono',monospace",color:"#888",fontSize:13}}>Loading NexStore…</div>;
+
+  const TABS=[
+    {key:"dashboard",    label:"Dashboard",  icon:"▦"},
+    {key:"scan",         label:"Scan",        icon:"⬡", badge:"NEW"},
+    {key:"log-in",       label:"Log IN",      icon:"↓"},
+    {key:"log-out",      label:"Log OUT",     icon:"↑"},
+    {key:"inventory",    label:"Inventory",   icon:"☰"},
+    {key:"bom",          label:"BOM Import",  icon:"⊞"},
+    {key:"transactions", label:"Tx Log",      icon:"◷"},
+  ];
+
+  return (
+    <div style={{minHeight:"100vh",background:"#F5F3EE",fontFamily:"'IBM Plex Sans','Segoe UI',sans-serif",color:"#1a1a1a"}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0;}
+        ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:#eee}::-webkit-scrollbar-thumb{background:#bbb;border-radius:3px}
+        .btn{cursor:pointer;border:none;font-family:inherit;font-weight:600;transition:all .12s;border-radius:6px;}
+        .btn:hover{filter:brightness(.92)}
+        .btn-primary{background:#1C3F6E;color:#fff;padding:10px 20px;font-size:13.5px;}
+        .btn-amber{background:#E8A020;color:#fff;padding:10px 20px;font-size:13.5px;}
+        .btn-green{background:#1A5C3A;color:#fff;padding:10px 20px;font-size:13.5px;}
+        .btn-red{background:#8B1A1A;color:#fff;padding:10px 20px;font-size:13.5px;}
+        .btn-ghost{background:transparent;color:#444;padding:8px 16px;font-size:13px;border:1.5px solid #ccc;}
+        .btn-ghost:hover{background:#e8e4dc;border-color:#999;}
+        .btn-sm{padding:5px 11px;font-size:12px;}
+        .inp{background:#fff;border:1.5px solid #d0cec8;border-radius:6px;color:#1a1a1a;padding:9px 12px;font-size:13.5px;width:100%;font-family:inherit;outline:none;transition:border .12s;}
+        .inp:focus{border-color:#1C3F6E;}
+        .inp.err{border-color:#c0392b;}
+        .sel{background:#fff;border:1.5px solid #d0cec8;border-radius:6px;color:#1a1a1a;padding:9px 12px;font-size:13.5px;font-family:inherit;outline:none;cursor:pointer;}
+        .sel:focus{border-color:#1C3F6E;}
+        .card{background:#fff;border:1px solid #ddd;border-radius:12px;padding:22px 24px;}
+        .lbl{font-size:11px;font-weight:700;color:#999;letter-spacing:.07em;text-transform:uppercase;display:block;margin-bottom:5px;}
+        .th{background:#1C3F6E;color:#c8d8f0;padding:11px 14px;font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;text-align:left;white-space:nowrap;}
+        .td{padding:11px 14px;font-size:13px;border-bottom:1px solid #f0ede8;vertical-align:middle;}
+        .row-hover:hover{background:#f8f6f2 !important;}
+        .badge{display:inline-block;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:700;}
+        .modal-bg{position:fixed;inset:0;background:rgba(20,20,20,.45);backdrop-filter:blur(3px);z-index:100;display:flex;align-items:center;justify-content:center;padding:20px;}
+        .modal{background:#fff;border-radius:14px;padding:28px;width:100%;max-width:540px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.18);}
+        .toast{position:fixed;bottom:24px;right:24px;z-index:300;padding:11px 20px;border-radius:8px;font-size:12.5px;font-weight:600;font-family:'IBM Plex Mono',monospace;animation:slideUp .2s ease;box-shadow:0 4px 20px rgba(0,0,0,.12);}
+        @keyframes slideUp{from{transform:translateY(14px);opacity:0}to{transform:translateY(0);opacity:1}}
+        .ac-item{padding:10px 14px;cursor:pointer;font-size:13px;border-bottom:1px solid #f0ede8;}
+        .ac-item:hover{background:#f5f3ee;}
+        .tab-nav{display:flex;gap:0;background:#1C3F6E;padding:0 20px;overflow-x:auto;}
+        .tab-btn{background:transparent;border:none;color:#7a9cc0;font-size:13px;font-weight:600;padding:13px 16px;cursor:pointer;font-family:inherit;border-bottom:3px solid transparent;transition:all .12s;white-space:nowrap;display:flex;align-items:center;gap:5px;}
+        .tab-btn.active{color:#fff;border-bottom-color:#E8A020;}
+        .tab-btn:hover{color:#e2e8f0;}
+        .scan-method{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:20px 12px;border-radius:10px;cursor:pointer;font-weight:600;font-size:13px;transition:all .15s;border:2px solid transparent;}
+        .tx-in{background:#d4edda;color:#155724;} .tx-out{background:#fce8e8;color:#7b1a1a;}
+        .tx-add{background:#dce8f5;color:#1a3a6e;} .tx-delete{background:#f5dce8;color:#6e1a3a;}
+        .tx-edit{background:#fef3cd;color:#856404;}
+        .pulse{animation:pulse 1.8s ease-in-out infinite;}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+        .step-dot{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;}
+      `}</style>
+
+      {/* HEADER */}
+      <div style={{background:"#1C3F6E",padding:"14px 24px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <div style={{width:36,height:36,background:"#E8A020",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>⚡</div>
+          <div>
+            <div style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,fontSize:16,color:"#fff",letterSpacing:".04em"}}>NexStore IMS</div>
+            <div style={{fontSize:10,color:"#7a9cc0",letterSpacing:".09em"}}>NEXWAH TECHNOLOGY</div>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {lowStock.length>0&&<div style={{background:"#8B1A1A",border:"1px solid #c0392b",borderRadius:6,padding:"5px 12px",fontSize:11.5,color:"#ffcccc",fontWeight:700}}>⚠ {lowStock.length} LOW</div>}
+          <button className="btn btn-amber" style={{fontSize:12.5,padding:"8px 16px"}} onClick={()=>setTab("scan")}>📷 Quick Scan</button>
+          <button className="btn btn-ghost btn-sm" style={{color:"#c8d8f0",borderColor:"#3a5f8a"}} onClick={exportCSV}>↓ CSV</button>
+        </div>
+      </div>
+
+      {/* TABS */}
+      <div className="tab-nav">
+        {TABS.map(t=>(
+          <button key={t.key} className={`tab-btn ${tab===t.key?"active":""}`} onClick={()=>setTab(t.key)}>
+            <span>{t.icon}</span>{t.label}
+            {t.badge&&<span style={{background:"#E8A020",color:"#fff",fontSize:9,padding:"1px 5px",borderRadius:3,fontWeight:800,marginLeft:2}}>{t.badge}</span>}
+          </button>
+        ))}
+      </div>
+
+      <div style={{maxWidth:1280,margin:"0 auto",padding:"24px 20px"}}>
+
+        {/* ════ DASHBOARD ════ */}
+        {tab==="dashboard"&&(
+          <div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:14,marginBottom:24}}>
+              {[{l:"Total SKUs",v:inventory.length,i:"🏷",c:"#1C3F6E"},{l:"Total Units",v:totalQty.toLocaleString(),i:"📦",c:"#1A5C3A"},{l:"Low Stock",v:lowStock.length,i:"⚠️",c:"#8B1A1A"},{l:"Transactions",v:transactions.length,i:"📋",c:"#5A3E8B"}].map(s=>(
+                <div className="card" key={s.l} style={{borderTop:`4px solid ${s.c}`}}>
+                  <div style={{fontSize:24,marginBottom:6}}>{s.i}</div>
+                  <div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:30,fontWeight:700,color:s.c}}>{s.v}</div>
+                  <div style={{fontSize:11,color:"#999",fontWeight:700,marginTop:3,textTransform:"uppercase",letterSpacing:".05em"}}>{s.l}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:18}}>
+              <div className="card">
+                <div style={{fontWeight:700,fontSize:13.5,marginBottom:14,color:"#8B1A1A"}}>⚠ Low Stock Alerts</div>
+                {lowStock.length===0?<div style={{color:"#1A5C3A",fontSize:13,fontWeight:600}}>✓ All components adequately stocked</div>:(
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    {lowStock.slice(0,7).map(i=>(
+                      <div key={i.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",background:"#fef5f5",borderRadius:8,border:"1px solid #f5c6c6"}}>
+                        <div><div style={{fontSize:12,fontWeight:700,fontFamily:"'IBM Plex Mono',monospace"}}>{i.partNumber}</div><div style={{fontSize:11,color:"#999"}}>{i.description.slice(0,40)}…</div></div>
+                        <div style={{textAlign:"right"}}><div style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,color:"#8B1A1A",fontSize:15}}>{i.quantity}</div><div style={{fontSize:10,color:"#bbb"}}>min:{i.stockLevel}</div></div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="card">
+                <div style={{fontWeight:700,fontSize:13.5,marginBottom:14}}>📋 Recent Transactions</div>
+                {transactions.length===0?<div style={{color:"#bbb",fontSize:13}}>No transactions yet.</div>:(
+                  <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                    {transactions.slice(0,8).map(tx=>(
+                      <div key={tx.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12.5}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <span className={`badge tx-${tx.type.toLowerCase()}`}>{tx.type}</span>
+                          <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:11.5}}>{tx.partNumber}</span>
+                        </div>
+                        <div style={{textAlign:"right"}}>
+                          <div style={{fontWeight:700,color:tx.qty>0?"#1A5C3A":"#8B1A1A"}}>{tx.qty>0?"+":""}{tx.qty}</div>
+                          <div style={{fontSize:10,color:"#bbb"}}>{fmt(tx.ts)}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ════ SCAN TAB ════ */}
+        {tab==="scan"&&(
+          <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:20,alignItems:"start"}}>
+            {/* LEFT — input methods */}
+            <div style={{display:"flex",flexDirection:"column",gap:16}}>
+              <div className="card" style={{borderTop:"4px solid #E8A020"}}>
+                <div style={{fontWeight:700,fontSize:16,marginBottom:4}}>⬡ Component Scanner</div>
+                <div style={{fontSize:12.5,color:"#888",marginBottom:18,lineHeight:1.6}}>
+                  Scan a barcode or QR code on incoming component packaging to instantly identify and log it. Works with camera or uploaded photos.
+                </div>
+
+                {/* Two scan modes */}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:20}}>
+                  <button className="scan-method" style={{background:"#1C3F6E",color:"#fff",border:"2px solid #1C3F6E"}}
+                    onClick={()=>{
+                      if (!window.ZXing) {
+                        const s=document.createElement("script");
+                        s.src="https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.19.1/umd/index.min.js";
+                        s.onload=()=>setShowCamera(true); document.head.appendChild(s);
+                      } else setShowCamera(true);
+                    }}>
+                    <span style={{fontSize:32}}>📷</span>
+                    <span>Live Camera</span>
+                    <span style={{fontSize:10.5,opacity:.75,fontWeight:400}}>Barcode / QR scan</span>
+                  </button>
+
+                  <label className="scan-method" style={{background:"#f5f3ee",color:"#444",border:"2px dashed #ccc",cursor:"pointer"}}
+                    onMouseOver={e=>{e.currentTarget.style.background="#e8e4dc";e.currentTarget.style.borderColor="#aaa";}}
+                    onMouseOut={e=>{e.currentTarget.style.background="#f5f3ee";e.currentTarget.style.borderColor="#ccc";}}>
+                    <span style={{fontSize:32}}>🖼</span>
+                    <span>Upload Photo</span>
+                    <span style={{fontSize:10.5,color:"#aaa",fontWeight:400}}>Auto-decode barcode</span>
+                    <input ref={scanImgRef} type="file" accept="image/*" onChange={handleScanImgUpload} style={{display:"none"}}/>
+                  </label>
+                </div>
+
+                {imgDecoding&&(
+                  <div className="pulse" style={{background:"#fef3cd",border:"1px solid #fde68a",borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13,fontWeight:600,color:"#92400e",textAlign:"center"}}>
+                    🔍 Decoding barcode from image…
+                  </div>
+                )}
+
+                {/* Manual entry */}
+                <div style={{borderTop:"1px solid #eee",paddingTop:14}}>
+                  <label className="lbl">Or type part number / serial</label>
+                  <div style={{display:"flex",gap:8}}>
+                    <input className="inp" placeholder="e.g. NWCB-0004-001"
+                      value={scanRaw}
+                      onChange={e=>{ setScanRaw(e.target.value); setScanMatch(resolveMatch(e.target.value, inventory)); setScanImg(""); }}
+                    />
+                    <button className="btn btn-primary" onClick={()=>scanRaw.trim()&&handleScanDetected(scanRaw.trim())}>Find</button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Session history */}
+              {scanHistory.length>0&&(
+                <div className="card">
+                  <div style={{fontWeight:700,fontSize:13,marginBottom:10,color:"#555"}}>🕓 Session Scan History ({scanHistory.length})</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                    {scanHistory.slice(0,6).map(h=>(
+                      <div key={h.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12,padding:"6px 10px",background:"#faf9f7",borderRadius:7}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <span className={`badge tx-${h.type.toLowerCase()}`}>{h.type}</span>
+                          <span style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{h.partNumber}</span>
+                        </div>
+                        <div style={{textAlign:"right"}}>
+                          <span style={{fontWeight:700,color:h.qty>0?"#1A5C3A":"#8B1A1A"}}>{h.qty>0?"+":""}{h.qty}</span>
+                          <span style={{color:"#bbb",fontSize:10.5,marginLeft:8}}>{fmt(h.ts)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* RIGHT — result panel */}
+            <div>
+              {!scanRaw&&(
+                <div className="card" style={{textAlign:"center",padding:"52px 24px",border:"2px dashed #ddd",background:"#faf9f7"}}>
+                  <div style={{fontSize:52,marginBottom:12,opacity:.3}}>⬡</div>
+                  <div style={{fontWeight:700,fontSize:15,color:"#bbb",marginBottom:6}}>Waiting for scan…</div>
+                  <div style={{fontSize:12.5,color:"#ccc"}}>Use camera, upload a photo, or type a part number on the left.</div>
+                </div>
+              )}
+
+              {scanRaw&&(
+                <div className="card" style={{borderTop:`4px solid ${scanMatch?"#1A5C3A":"#8B1A1A"}`}}>
+                  {/* Raw decode */}
+                  <div style={{background:"#f5f3ee",borderRadius:8,padding:"10px 14px",marginBottom:16,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <div>
+                      <div style={{fontSize:10,color:"#bbb",fontWeight:700,letterSpacing:".07em",textTransform:"uppercase"}}>Scanned / Entered</div>
+                      <div style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:13.5}}>{scanRaw}</div>
+                    </div>
+                    <button className="btn btn-ghost btn-sm" onClick={()=>{setScanRaw("");setScanMatch(null);setScanImg("");}}>✕ Clear</button>
+                  </div>
+
+                  {scanMatch?(
+                    <>
+                      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,padding:"10px 14px",background:"#f0faf4",borderRadius:9,border:"1px solid #c3e6cb"}}>
+                        <span style={{fontSize:22}}>✅</span>
+                        <div>
+                          <div style={{fontWeight:700,color:"#1A5C3A",fontSize:13}}>Component identified!</div>
+                          <div style={{fontSize:11.5,color:"#888"}}>Found in NexStore inventory</div>
+                        </div>
+                      </div>
+
+                      <div style={{background:"#f5f3ee",borderRadius:10,padding:"13px 15px",marginBottom:16}}>
+                        <div style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:14,marginBottom:4}}>{scanMatch.partNumber}</div>
+                        <div style={{fontSize:12.5,color:"#555",marginBottom:8}}>{scanMatch.description}</div>
+                        {scanMatch.imageUrl&&<img src={scanMatch.imageUrl} alt="" style={{height:48,borderRadius:6,objectFit:"cover",border:"1px solid #ddd",marginBottom:8}}/>}
+                        <div style={{display:"flex",gap:14,fontSize:12,flexWrap:"wrap"}}>
+                          <span>📍 {scanMatch.location||"—"} / {scanMatch.row||"—"}</span>
+                          <span><b style={{color:scanMatch.quantity<=scanMatch.stockLevel?"#8B1A1A":"#1A5C3A"}}>{scanMatch.quantity}</b> in stock</span>
+                          <span style={{color:"#bbb"}}>min: {scanMatch.stockLevel}</span>
+                        </div>
+                      </div>
+
+                      {/* Attached delivery photo */}
+                      {scanImg&&(
+                        <div style={{marginBottom:14}}>
+                          <label className="lbl">Delivery photo attached</label>
+                          <img src={scanImg} alt="" style={{height:64,borderRadius:7,objectFit:"cover",border:"1px solid #ddd"}}/>
+                        </div>
+                      )}
+
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+                        <div>
+                          <label className="lbl">Action</label>
+                          <select className="sel" style={{width:"100%"}} value={scanAction} onChange={e=>setScanAction(e.target.value)}>
+                            <option value="IN">Stock IN — Receiving</option>
+                            <option value="OUT">Stock OUT — Issuing</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="lbl">Quantity</label>
+                          <input className="inp" type="number" min="1" value={scanQty} onChange={e=>setScanQty(e.target.value)}/>
+                          <div style={{fontSize:11,color:"#aaa",marginTop:3}}>
+                            After: <b style={{color: (scanAction==="IN"?scanMatch.quantity+(+scanQty||0):Math.max(0,scanMatch.quantity-(+scanQty||0)))<=scanMatch.stockLevel?"#8B1A1A":"#1A5C3A"}}>
+                              {scanAction==="IN"?scanMatch.quantity+(+scanQty||0):Math.max(0,scanMatch.quantity-(+scanQty||0))}
+                            </b>
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{marginBottom:14}}>
+                        <label className="lbl">Notes / Reference</label>
+                        <input className="inp" placeholder="PO number, project ref…" value={scanNotes} onChange={e=>setScanNotes(e.target.value)}/>
+                      </div>
+
+                      <button className={`btn ${scanAction==="IN"?"btn-green":"btn-red"}`} style={{width:"100%",padding:"13px",fontSize:14.5}}
+                        onClick={commitScan}>
+                        ✓ Confirm Stock {scanAction==="IN"?"IN ↓":"OUT ↑"} — {Math.abs(+scanQty||0)} × {scanMatch.partNumber}
+                      </button>
+                    </>
+                  ):(
+                    <>
+                      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,padding:"10px 14px",background:"#fef5f5",borderRadius:9,border:"1px solid #f5c6c6"}}>
+                        <span style={{fontSize:22}}>❓</span>
+                        <div>
+                          <div style={{fontWeight:700,color:"#8B1A1A",fontSize:13}}>Not found in inventory</div>
+                          <div style={{fontSize:11.5,color:"#888"}}>This part number is not in NexStore yet</div>
+                        </div>
+                      </div>
+                      {scanImg&&<img src={scanImg} alt="" style={{width:"100%",maxHeight:120,objectFit:"cover",borderRadius:9,border:"1px solid #ddd",marginBottom:14}}/>}
+                      <div style={{fontSize:13,color:"#555",marginBottom:16,background:"#f5f3ee",padding:"12px",borderRadius:8}}>
+                        Scanned: <code style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700}}>{scanRaw}</code><br/>
+                        <span style={{fontSize:12,color:"#888",marginTop:4,display:"block"}}>Would you like to create this as a new component?</span>
+                      </div>
+                      <div style={{display:"flex",gap:8}}>
+                        <button className="btn btn-ghost" style={{flex:1}} onClick={()=>{setScanRaw("");setScanMatch(null);setScanImg("");}}>Cancel</button>
+                        <button className="btn btn-primary" style={{flex:1}} onClick={()=>{
+                          setForm({partNumber:scanRaw,nexwahPN:"",description:"",quantity:"1",stockLevel:"10",location:"",row:"",order:"0",imageUrl:scanImg||""});
+                          setFormErr({}); setModal("add"); setScanRaw(""); setScanMatch(null); setScanImg("");
+                        }}>+ Add to Inventory</button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ════ LOG IN / LOG OUT ════ */}
+        {(tab==="log-in"||tab==="log-out")&&(()=>{
+          const type=tab==="log-in"?"IN":"OUT";
+          if (txForm.type!==type) setTxForm(p=>({...p,type}));
+          return (
+            <div style={{maxWidth:600}}>
+              <div className="card">
+                <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:22}}>
+                  <div style={{width:40,height:40,borderRadius:10,background:type==="IN"?"#1A5C3A":"#8B1A1A",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,color:"#fff"}}>{type==="IN"?"↓":"↑"}</div>
+                  <div><div style={{fontWeight:700,fontSize:17}}>Log Component {type==="IN"?"IN":"OUT"}</div><div style={{fontSize:12,color:"#999"}}>Search by Part Number, NexwahPN or description</div></div>
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:20}}>
+                  {["Identify","Confirm & Submit"].map((s,i)=>(
+                    <div key={s} style={{display:"flex",alignItems:"center",gap:7}}>
+                      <div className="step-dot" style={{background:txStep>i?"#1C3F6E":"#e8e4dc",color:txStep>i?"#fff":"#bbb"}}>{i+1}</div>
+                      <span style={{fontSize:12.5,fontWeight:600,color:txStep>i?"#1C3F6E":"#bbb"}}>{s}</span>
+                      {i<1&&<div style={{width:28,height:2,background:"#ddd",margin:"0 4px"}}/>}
+                    </div>
+                  ))}
+                </div>
+
+                {txStep===1&&(
+                  <div>
+                    <label className="lbl">Search Component</label>
+                    <div style={{position:"relative",marginBottom:14}}>
+                      <input className="inp" placeholder="Part number, NexwahPN, description…" value={txForm.partNumber} onChange={e=>searchParts(e.target.value)} autoComplete="off"/>
+                      {txMatches.length>0&&(
+                        <div style={{position:"absolute",top:"100%",left:0,right:0,background:"#fff",border:"1.5px solid #d0cec8",borderTop:"none",borderRadius:"0 0 8px 8px",zIndex:50,boxShadow:"0 6px 20px rgba(0,0,0,.1)"}}>
+                          {txMatches.map(m=>(
+                            <div key={m.id} className="ac-item" onClick={()=>selectTxPart(m)}>
+                              <div style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,fontSize:12.5}}>{m.partNumber}</div>
+                              <div style={{fontSize:11.5,color:"#666"}}>{m.description.slice(0,55)} · <b>Qty:{m.quantity}</b></div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{border:"1px solid #e8e4dc",borderRadius:8,overflow:"hidden",maxHeight:220,overflowY:"auto"}}>
+                      {inventory.map((item,idx)=>(
+                        <div key={item.id} onClick={()=>selectTxPart(item)} className="row-hover"
+                          style={{display:"flex",justifyContent:"space-between",padding:"9px 14px",cursor:"pointer",background:idx%2===0?"#faf9f7":"#fff",borderBottom:"1px solid #f0ede8"}}>
+                          <div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:11.5,fontWeight:600}}>{item.partNumber}</div><div style={{fontSize:11,color:"#999"}}>{item.description.slice(0,48)}</div></div>
+                          <div style={{textAlign:"right",fontSize:12}}><div style={{fontWeight:700}}>{item.quantity}</div><div style={{color:"#bbb",fontSize:10}}>{item.location}</div></div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {txStep===2&&txSelected&&(
+                  <div>
+                    <div style={{background:"#f5f3ee",borderRadius:10,padding:"13px 15px",marginBottom:18,border:"1px solid #ddd"}}>
+                      <div style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:14}}>{txSelected.partNumber}</div>
+                      <div style={{fontSize:12.5,color:"#555",marginTop:2}}>{txSelected.description}</div>
+                      <div style={{display:"flex",gap:14,marginTop:7,fontSize:12}}>
+                        <span>📍 {txSelected.location}/{txSelected.row}</span>
+                        <span style={{fontWeight:700}}>Stock: {txSelected.quantity}</span>
+                      </div>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+                      <div>
+                        <label className="lbl">Qty to {type==="IN"?"Add":"Remove"}</label>
+                        <input className="inp" type="number" min="1" value={txForm.qty} onChange={e=>setTxForm(p=>({...p,qty:e.target.value}))}/>
+                        <div style={{fontSize:11,color:"#aaa",marginTop:3}}>After: <b>{type==="IN"?txSelected.quantity+(+txForm.qty||0):Math.max(0,txSelected.quantity-(+txForm.qty||0))}</b></div>
+                      </div>
+                      <div>
+                        <label className="lbl">Notes</label>
+                        <input className="inp" placeholder="Project / PO…" value={txForm.notes} onChange={e=>setTxForm(p=>({...p,notes:e.target.value}))}/>
+                      </div>
+                    </div>
+                    <div style={{marginBottom:14}}>
+                      <label className="lbl">Attach Photo (optional)</label>
+                      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                        <button className="btn btn-ghost btn-sm" onClick={()=>document.getElementById("tx-img")?.click()}>📷 Upload</button>
+                        <input id="tx-img" type="file" accept="image/*" capture="environment" onChange={e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>setTxForm(p=>({...p,imageDataUrl:ev.target.result}));r.readAsDataURL(f);e.target.value="";}} style={{display:"none"}}/>
+                        {txForm.imageDataUrl&&<span style={{fontSize:11,color:"#1A5C3A",fontWeight:600}}>✓ Attached</span>}
+                      </div>
+                      {txForm.imageDataUrl&&<img src={txForm.imageDataUrl} alt="" style={{marginTop:8,height:52,borderRadius:6,border:"1px solid #ddd",objectFit:"cover"}}/>}
+                    </div>
+                    <div style={{display:"flex",gap:8}}>
+                      <button className="btn btn-ghost" onClick={()=>{setTxStep(1);setTxSelected(null);}}>← Back</button>
+                      <button className={`btn ${type==="IN"?"btn-green":"btn-red"}`} style={{flex:1}} onClick={submitTx}>Confirm {type==="IN"?"Stock IN ↓":"Stock OUT ↑"}</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* ════ INVENTORY ════ */}
+        {tab==="inventory"&&(
+          <div>
+            <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
+              <input className="inp" style={{maxWidth:280}} placeholder="🔍 Search part, description, location…" value={search} onChange={e=>setSearch(e.target.value)}/>
+              <div style={{marginLeft:"auto",display:"flex",gap:8}}>
+                <button className="btn btn-ghost" onClick={exportCSV}>↓ Export CSV</button>
+                <button className="btn btn-primary" onClick={openAdd}>+ Add Component</button>
+              </div>
+            </div>
+            <div style={{background:"#fff",border:"1px solid #ddd",borderRadius:12,overflow:"hidden"}}>
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse"}}>
+                  <thead><tr>{["Part Number","NexwahPN","Description","Qty","Min","Location","Row","Status","Actions"].map(h=><th key={h} className="th">{h}</th>)}</tr></thead>
+                  <tbody>
+                    {filtered.length===0?<tr><td colSpan={9} style={{textAlign:"center",padding:"40px",color:"#bbb"}}>No components found.</td></tr>
+                    :filtered.map((item,idx)=>{
+                      const isLow=item.quantity<=item.stockLevel;
+                      return (
+                        <tr key={item.id} className="row-hover" style={{background:idx%2===0?"#faf9f7":"#fff"}}>
+                          <td className="td"><div style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:600,fontSize:11.5}}>{item.partNumber}</div>{item.imageUrl&&<img src={item.imageUrl} alt="" style={{height:24,borderRadius:4,marginTop:3,objectFit:"cover"}}/>}</td>
+                          <td className="td" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:11,color:"#666"}}>{item.nexwahPN||"—"}</td>
+                          <td className="td" style={{maxWidth:180,fontSize:12.5,color:"#444"}}>{item.description}</td>
+                          <td className="td" style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:14,color:isLow?"#8B1A1A":"#1a1a1a"}}>{item.quantity}</td>
+                          <td className="td" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:12,color:"#bbb"}}>{item.stockLevel}</td>
+                          <td className="td" style={{fontSize:12}}>{item.location}</td>
+                          <td className="td" style={{fontSize:12}}>{item.row}</td>
+                          <td className="td"><span className="badge" style={isLow?{background:"#fce8e8",color:"#7b1a1a"}:{background:"#d4edda",color:"#155724"}}>{item.quantity===0?"OUT":isLow?"LOW":"OK"}</span></td>
+                          <td className="td"><div style={{display:"flex",gap:5}}><button className="btn btn-ghost btn-sm" onClick={()=>openView(item)}>👁</button><button className="btn btn-ghost btn-sm" onClick={()=>openEdit(item)}>✏</button><button className="btn btn-sm" style={{background:"#fce8e8",color:"#7b1a1a",border:"1px solid #f5c6c6"}} onClick={()=>openDelete(item)}>🗑</button></div></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{padding:"9px 16px",borderTop:"1px solid #f0ede8",fontSize:11,color:"#bbb"}}>{filtered.length} of {inventory.length} components</div>
+            </div>
+          </div>
+        )}
+
+        {/* ════ BOM ════ */}
+        {tab==="bom"&&(
+          <div style={{maxWidth:760}}>
+            <div className="card">
+              <div style={{fontWeight:700,fontSize:16,marginBottom:4}}>⊞ BOM List Import</div>
+              <div style={{fontSize:12.5,color:"#888",marginBottom:20}}>Bulk log IN or OUT via CSV BOM. Format: <code style={{background:"#f5f3ee",padding:"1px 5px",borderRadius:3,fontSize:12}}>PartNumber, Description, Qty, Location</code></div>
+              <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:22}}>
+                {["Upload CSV","Review","Applied"].map((s,i)=>(
+                  <div key={s} style={{display:"flex",alignItems:"center",gap:7}}>
+                    <div className="step-dot" style={{background:bomStep>i?"#1C3F6E":"#e8e4dc",color:bomStep>i?"#fff":"#bbb"}}>{i+1}</div>
+                    <span style={{fontSize:12,fontWeight:600,color:bomStep>i?"#1C3F6E":"#bbb"}}>{s}</span>
+                    {i<2&&<div style={{width:26,height:2,background:"#ddd",margin:"0 4px"}}/>}
+                  </div>
+                ))}
+              </div>
+              {bomStep===1&&(
+                <div>
+                  <div style={{marginBottom:12}}><label className="lbl">Transaction Type</label><select className="sel" value={bomType} onChange={e=>setBomType(e.target.value)}><option value="IN">Stock IN</option><option value="OUT">Stock OUT</option></select></div>
+                  <label className="btn btn-primary" style={{display:"inline-flex",alignItems:"center",gap:8,cursor:"pointer"}}>📂 Upload BOM CSV<input type="file" accept=".csv" onChange={parseBOM} style={{display:"none"}}/></label>
+                </div>
+              )}
+              {bomStep===2&&(
+                <div>
+                  <div style={{fontWeight:700,fontSize:14,marginBottom:12}}>{bomRows.length} rows — review before applying</div>
+                  <div style={{border:"1px solid #ddd",borderRadius:8,overflow:"hidden",marginBottom:16}}>
+                    <table style={{width:"100%",borderCollapse:"collapse"}}>
+                      <thead><tr>{["Part Number","Description","Qty","Status","Skip"].map(h=><th key={h} className="th" style={{fontSize:10}}>{h}</th>)}</tr></thead>
+                      <tbody>{bomRows.map((row,i)=>(
+                        <tr key={i} style={{background:row.skip?"#f5f5f5":i%2===0?"#faf9f7":"#fff",opacity:row.skip?.5:1}}>
+                          <td className="td" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:11}}>{row.partNumber}</td>
+                          <td className="td" style={{fontSize:11.5,maxWidth:160}}>{row.description.slice(0,40)}</td>
+                          <td className="td" style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700}}>{row.qty}</td>
+                          <td className="td"><span className="badge" style={row.status==="matched"?{background:"#d4edda",color:"#155724"}:{background:"#fff3cd",color:"#856404"}}>{row.status==="matched"?"✓ Matched":"+ New"}</span></td>
+                          <td className="td"><input type="checkbox" checked={!!row.skip} onChange={e=>{const u=[...bomRows];u[i]={...u[i],skip:e.target.checked};setBomRows(u);}}/></td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                  <div style={{display:"flex",gap:8}}><button className="btn btn-ghost" onClick={()=>setBomStep(1)}>← Back</button><button className={`btn ${bomType==="IN"?"btn-green":"btn-red"}`} style={{flex:1}} onClick={applyBOM}>Apply {bomRows.filter(r=>!r.skip).length} rows</button></div>
+                </div>
+              )}
+              {bomStep===3&&(<div style={{textAlign:"center",padding:"24px 0"}}><div style={{fontSize:44,marginBottom:10}}>✅</div><div style={{fontWeight:700,fontSize:17,marginBottom:12}}>BOM Applied!</div><button className="btn btn-primary" onClick={()=>{setBomStep(1);setBomRows([]);}}>Import Another</button></div>)}
+            </div>
+          </div>
+        )}
+
+        {/* ════ TX LOG ════ */}
+        {tab==="transactions"&&(
+          <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+              <div style={{fontWeight:700,fontSize:15}}>Transaction Log ({transactions.length})</div>
+              <button className="btn btn-ghost" onClick={exportTxCSV}>↓ Export Log CSV</button>
+            </div>
+            <div style={{background:"#fff",border:"1px solid #ddd",borderRadius:12,overflow:"hidden"}}>
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse"}}>
+                  <thead><tr>{["Timestamp","Type","Part Number","Description","Qty Δ","Before","After","Notes","Img"].map(h=><th key={h} className="th">{h}</th>)}</tr></thead>
+                  <tbody>
+                    {transactions.length===0?<tr><td colSpan={9} style={{textAlign:"center",padding:"40px",color:"#bbb"}}>No transactions yet.</td></tr>
+                    :transactions.map((tx,idx)=>(
+                      <tr key={tx.id} className="row-hover" style={{background:idx%2===0?"#faf9f7":"#fff"}}>
+                        <td className="td" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:10.5,whiteSpace:"nowrap"}}>{fmt(tx.ts)}</td>
+                        <td className="td"><span className={`badge tx-${tx.type.toLowerCase()}`}>{tx.type}</span></td>
+                        <td className="td" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:11.5,fontWeight:600}}>{tx.partNumber}</td>
+                        <td className="td" style={{fontSize:12,color:"#666",maxWidth:150}}>{tx.description?.slice(0,38)}</td>
+                        <td className="td" style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,color:tx.qty>0?"#1A5C3A":"#8B1A1A"}}>{tx.qty>0?"+":""}{tx.qty}</td>
+                        <td className="td" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:11.5,color:"#bbb"}}>{tx.before}</td>
+                        <td className="td" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:11.5,fontWeight:700}}>{tx.after}</td>
+                        <td className="td" style={{fontSize:11.5,color:"#999"}}>{tx.notes||"—"}</td>
+                        <td className="td">{tx.imageDataUrl&&<img src={tx.imageDataUrl} alt="" style={{height:32,width:32,borderRadius:5,objectFit:"cover",border:"1px solid #ddd"}}/>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ════ MODALS ════ */}
+      {(modal==="add"||modal==="edit")&&(
+        <div className="modal-bg" onClick={e=>e.target===e.currentTarget&&setModal(null)}>
+          <div className="modal">
+            <div style={{fontWeight:800,fontSize:17,marginBottom:18}}>{modal==="add"?"+ Add Component":"✏ Edit Component"}</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+              {[{k:"partNumber",l:"Part Number *",full:true},{k:"nexwahPN",l:"NexwahPN"},{k:"location",l:"Location"},{k:"row",l:"Row"},{k:"quantity",l:"Quantity *",type:"number"},{k:"stockLevel",l:"Min Stock Level",type:"number"},{k:"order",l:"Order Qty",type:"number"}].map(f=>(
+                <div key={f.k} style={{gridColumn:f.full?"span 2":"span 1"}}>
+                  <label className="lbl">{f.l}</label>
+                  <input className={`inp ${formErr[f.k]?"err":""}`} type={f.type||"text"} value={form[f.k]||""} onChange={e=>setForm(p=>({...p,[f.k]:e.target.value}))}/>
+                  {formErr[f.k]&&<div style={{fontSize:11,color:"#c0392b",marginTop:2}}>{formErr[f.k]}</div>}
+                </div>
+              ))}
+              <div style={{gridColumn:"span 2"}}><label className="lbl">Description *</label><textarea className="inp" rows={2} value={form.description||""} onChange={e=>setForm(p=>({...p,description:e.target.value}))} style={{resize:"vertical"}}/>{formErr.description&&<div style={{fontSize:11,color:"#c0392b",marginTop:2}}>{formErr.description}</div>}</div>
+              <div style={{gridColumn:"span 2"}}>
+                <label className="lbl">Component Photo</label>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <button className="btn btn-ghost btn-sm" type="button" onClick={()=>imgRef.current?.click()}>📷 Upload</button>
+                  <input ref={imgRef} type="file" accept="image/*" capture="environment" onChange={onImgChange} style={{display:"none"}}/>
+                  {form.imageUrl&&<span style={{fontSize:11,color:"#1A5C3A",fontWeight:600}}>✓ Attached</span>}
+                </div>
+                {form.imageUrl&&<img src={form.imageUrl} alt="" style={{marginTop:7,height:52,borderRadius:6,border:"1px solid #ddd",objectFit:"cover"}}/>}
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:20}}>
+              <button className="btn btn-ghost" onClick={()=>setModal(null)}>Cancel</button>
+              <button className="btn btn-primary" onClick={modal==="add"?saveAdd:saveEdit}>{modal==="add"?"Add Component":"Save"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modal==="delete"&&selected&&(
+        <div className="modal-bg" onClick={e=>e.target===e.currentTarget&&setModal(null)}>
+          <div className="modal" style={{maxWidth:400}}>
+            <div style={{fontSize:40,marginBottom:10}}>🗑</div>
+            <div style={{fontWeight:800,fontSize:16,marginBottom:8}}>Remove Component?</div>
+            <div style={{color:"#555",fontSize:13.5,marginBottom:20}}>Permanently remove <b>{selected.partNumber}</b>. Logged as DELETE transaction.</div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+              <button className="btn btn-ghost" onClick={()=>setModal(null)}>Cancel</button>
+              <button className="btn btn-red" onClick={doDelete}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modal==="view"&&selected&&(
+        <div className="modal-bg" onClick={e=>e.target===e.currentTarget&&setModal(null)}>
+          <div className="modal">
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+              <div><div style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:15}}>{selected.partNumber}</div><div style={{fontSize:12,color:"#999",marginTop:2}}>{selected.nexwahPN}</div></div>
+              <span className="badge" style={selected.quantity<=selected.stockLevel?{background:"#fce8e8",color:"#7b1a1a"}:{background:"#d4edda",color:"#155724"}}>{selected.quantity===0?"OUT":selected.quantity<=selected.stockLevel?"LOW":"OK"}</span>
+            </div>
+            <div style={{fontSize:13,color:"#333",marginBottom:14,lineHeight:1.5}}>{selected.description}</div>
+            {selected.imageUrl&&<img src={selected.imageUrl} alt="" style={{width:"100%",maxHeight:130,objectFit:"cover",borderRadius:8,border:"1px solid #ddd",marginBottom:14}}/>}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              {[{l:"Quantity",v:selected.quantity},{l:"Min Stock",v:selected.stockLevel},{l:"Order",v:selected.order},{l:"Location",v:selected.location},{l:"Row",v:selected.row},{l:"NexwahPN",v:selected.nexwahPN||"—"}].map(f=>(
+                <div key={f.l} style={{background:"#f5f3ee",borderRadius:8,padding:"9px 13px"}}>
+                  <div style={{fontSize:10,color:"#bbb",fontWeight:700,letterSpacing:".07em",textTransform:"uppercase",marginBottom:2}}>{f.l}</div>
+                  <div style={{fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,fontSize:13.5}}>{f.v}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:18}}>
+              <button className="btn btn-ghost" onClick={()=>setModal(null)}>Close</button>
+              <button className="btn btn-primary" onClick={()=>{setModal(null);setTimeout(()=>openEdit(selected),50);}}>Edit</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ════ CAMERA OVERLAY ════ */}
+      {showCamera&&<BarcodeScanner onDetected={handleScanDetected} onClose={()=>setShowCamera(false)}/>}
+
+      {/* TOAST */}
+      {toast&&(
+        <div className="toast" style={{background:toast.type==="error"?"#fce8e8":toast.type==="warn"?"#fef3cd":"#d4edda",border:`1px solid ${toast.type==="error"?"#f5c6c6":toast.type==="warn"?"#fde68a":"#c3e6cb"}`,color:toast.type==="error"?"#7b1a1a":toast.type==="warn"?"#92400e":"#155724"}}>
+          {toast.type==="error"?"✗ ":toast.type==="warn"?"⚠ ":"✓ "}{toast.msg}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(NexStoreIMS));
+  </script>
+</body>
+</html>
